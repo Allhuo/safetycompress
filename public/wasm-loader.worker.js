@@ -24,51 +24,72 @@ self.onmessage = async (e) => {
         throw new Error(`下载失败: ${response.status} ${response.statusText}`);
       }
       
+      // 网络诊断信息
       const contentLength = +response.headers.get('Content-Length');
+      const contentType = response.headers.get('Content-Type');
+      const acceptRanges = response.headers.get('Accept-Ranges');
+      
+      console.log('网络诊断信息:', {
+        contentLength,
+        contentType,
+        acceptRanges,
+        hasContentLength: !!contentLength,
+        headers: Array.from(response.headers.entries())
+      });
+      
+      self.postMessage({
+        type: 'debug',
+        info: {
+          hasContentLength: !!contentLength,
+          contentLength,
+          contentType,
+          acceptRanges,
+          message: contentLength ? 
+            `服务器提供了Content-Length: ${(contentLength / 1024 / 1024).toFixed(1)}MB` : 
+            '服务器未提供Content-Length，将使用估算进度'
+        }
+      });
       
       if (!contentLength) {
-        // 如果没有Content-Length，使用分段式进度显示
+        // 即使没有Content-Length，也基于实际数据量显示进度
         const chunks = [];
         const reader = response.body.getReader();
-        let estimatedProgress = 0;
-        
-        // 分阶段显示进度，避免只显示50%→100%
-        const progressSteps = [10, 20, 30, 45, 60, 75, 85, 95];
-        let stepIndex = 0;
+        let totalLength = 0;
+        let lastProgressTime = Date.now();
+        let estimatedTotal = 11 * 1024 * 1024; // 估算总大小11MB作为参考
         
         self.postMessage({
           type: 'progress', 
-          percent: 10,
-          message: '正在下载WASM文件（估算进度）...',
+          percent: 0,
+          message: '正在下载WASM文件（基于数据量估算）...',
           status: 'downloading'
         });
         
-        // 开始分段进度显示
-        const progressTimer = setInterval(() => {
-          if (stepIndex < progressSteps.length) {
-            estimatedProgress = progressSteps[stepIndex];
-            self.postMessage({
-              type: 'progress',
-              percent: estimatedProgress,
-              message: `正在下载WASM文件... ${estimatedProgress}%`,
-              status: 'downloading'
-            });
-            stepIndex++;
-          }
-        }, 300); // 每300ms更新一次进度
-        
-        // 读取数据
-        let totalLength = 0;
+        // 读取数据，基于实际接收的字节数显示进度
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           
           chunks.push(value);
           totalLength += value.length;
+          
+          // 基于实际接收的数据量计算进度
+          const now = Date.now();
+          if (now - lastProgressTime > 200) { // 每200ms更新一次进度
+            const estimatedPercent = Math.min(Math.round((totalLength / estimatedTotal) * 90), 95); // 最多到95%
+            const mbReceived = (totalLength / 1024 / 1024).toFixed(1);
+            
+            self.postMessage({
+              type: 'progress',
+              percent: estimatedPercent,
+              message: `正在下载WASM文件... ${mbReceived}MB (估算进度)`,
+              status: 'downloading',
+              received: totalLength,
+              estimated: estimatedTotal
+            });
+            lastProgressTime = now;
+          }
         }
-        
-        // 停止进度定时器
-        clearInterval(progressTimer);
         
         // 合并数据
         wasmData = new Uint8Array(totalLength);

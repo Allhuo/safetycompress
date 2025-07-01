@@ -159,6 +159,9 @@ export async function compressPDFWithGhostscript(
 
     // 执行Ghostscript命令（使用测试文件中的方式）
     const result = gs.callMain(args);
+    
+    console.log(`Ghostscript 执行结果: ${result}`);
+    console.log(`执行的命令参数:`, args);
 
     if (result !== 0) {
       throw new Error(`Ghostscript压缩失败，退出代码: ${result}`);
@@ -172,11 +175,28 @@ export async function compressPDFWithGhostscript(
       });
     }
 
+    // 检查输出文件是否存在
+    let fileExists = false;
+    try {
+      gs.FS.stat(outputFileName);
+      fileExists = true;
+      console.log(`输出文件 ${outputFileName} 存在`);
+    } catch (error) {
+      console.error(`输出文件 ${outputFileName} 不存在:`, error);
+      fileExists = false;
+    }
+
+    if (!fileExists) {
+      throw new Error('压缩完成但没有生成输出文件。可能是输入文件格式不受支持或压缩参数不正确。');
+    }
+
     // 读取压缩后的文件
     let compressedData: Uint8Array;
     try {
       compressedData = gs.FS.readFile(outputFileName);
+      console.log(`成功读取压缩文件，大小: ${compressedData.byteLength} 字节`);
     } catch (error) {
+      console.error('读取输出文件失败:', error);
       throw new Error('压缩完成但无法读取输出文件。可能是输入文件格式不受支持。');
     }
     
@@ -190,6 +210,25 @@ export async function compressPDFWithGhostscript(
     
     const compressedSize = compressedData.byteLength;
     const compressionRatio = ((originalSize - compressedSize) / originalSize) * 100;
+    
+    // 详细的压缩统计信息
+    console.log('压缩统计信息:', {
+      originalSize,
+      compressedSize,
+      compressionRatio: compressionRatio.toFixed(2) + '%',
+      sizeDifference: originalSize - compressedSize,
+      qualityUsed: quality,
+      qualitySettings: QUALITY_MAPPING[quality]
+    });
+    
+    // 验证压缩是否真的有效果
+    if (compressedSize >= originalSize) {
+      console.warn('⚠️ 压缩后文件大小未减少或增大了！', {
+        originalSize,
+        compressedSize,
+        increase: compressedSize - originalSize
+      });
+    }
     
     if (onProgress) {
       onProgress({
