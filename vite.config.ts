@@ -1,9 +1,28 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import compression from 'vite-plugin-compression'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    // 生成 gzip 压缩文件（特别针对WASM文件）
+    compression({
+      algorithm: 'gzip',
+      ext: '.gz',
+      threshold: 1024, // 只压缩大于1KB的文件
+      deleteOriginFile: false, // 保留原文件
+      filter: /\.(js|mjs|json|css|html|wasm)$/i, // 包含WASM文件
+    }),
+    // 生成 brotli 压缩文件（更好的压缩率）
+    compression({
+      algorithm: 'brotliCompress',
+      ext: '.br',
+      threshold: 1024,
+      deleteOriginFile: false,
+      filter: /\.(js|mjs|json|css|html|wasm)$/i, // 包含WASM文件
+    })
+  ],
   
   build: {
     rollupOptions: {
@@ -37,8 +56,10 @@ export default defineConfig({
     },
     // 设置较大的chunk警告大小，因为我们的WASM文件很大
     chunkSizeWarningLimit: 20000, // 20MB
-    // 启用gzip压缩预计算
+    // 启用压缩大小报告
     reportCompressedSize: true,
+    // 增大资源内联阈值（小文件内联，大文件如WASM保持分离）
+    assetsInlineLimit: 4096, // 4KB以下内联
   },
   
   server: {

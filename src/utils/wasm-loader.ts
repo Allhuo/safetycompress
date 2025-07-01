@@ -71,7 +71,7 @@ async function preloadWasmWithWorker(
         wasmWorker = new Worker('/wasm-loader.worker.js');
         
         wasmWorker.onmessage = (e) => {
-          const { type, percent, message, data, error, size, info } = e.data;
+          const { type, percent, message, data, error, size } = e.data;
           
           switch (type) {
             case 'progress':
@@ -82,19 +82,6 @@ async function preloadWasmWithWorker(
                   percentage: percent,
                   message,
                   status: e.data.status
-                });
-              }
-              break;
-              
-            case 'debug':
-              console.log('WASM下载诊断:', info);
-              if (onProgress && info.message) {
-                onProgress({
-                  loaded: 0,
-                  total: 100,
-                  percentage: 0,
-                  message: info.message,
-                  status: 'debug'
                 });
               }
               break;

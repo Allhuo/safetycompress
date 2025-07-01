@@ -24,31 +24,7 @@ self.onmessage = async (e) => {
         throw new Error(`下载失败: ${response.status} ${response.statusText}`);
       }
       
-      // 网络诊断信息
       const contentLength = +response.headers.get('Content-Length');
-      const contentType = response.headers.get('Content-Type');
-      const acceptRanges = response.headers.get('Accept-Ranges');
-      
-      console.log('网络诊断信息:', {
-        contentLength,
-        contentType,
-        acceptRanges,
-        hasContentLength: !!contentLength,
-        headers: Array.from(response.headers.entries())
-      });
-      
-      self.postMessage({
-        type: 'debug',
-        info: {
-          hasContentLength: !!contentLength,
-          contentLength,
-          contentType,
-          acceptRanges,
-          message: contentLength ? 
-            `服务器提供了Content-Length: ${(contentLength / 1024 / 1024).toFixed(1)}MB` : 
-            '服务器未提供Content-Length，将使用估算进度'
-        }
-      });
       
       if (!contentLength) {
         // 即使没有Content-Length，也基于实际数据量显示进度
