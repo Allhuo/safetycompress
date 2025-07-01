@@ -244,7 +244,13 @@ export function validatePDFFile(fileBuffer: ArrayBuffer): boolean {
 /**
  * 获取可用的压缩质量等级
  */
-export function getCompressionQualities() {
+export function getCompressionQualities(): Array<{
+  id: 'high-efficiency' | 'balanced' | 'high-quality';
+  name: string;
+  setting: string;
+  dpi: number;
+  description: string;
+}> {
   return [
     { 
       id: 'high-efficiency' as const, 
@@ -261,7 +267,7 @@ export function getCompressionQualities() {
       name: '高质量',
       ...QUALITY_MAPPING['high-quality'] 
     }
-  ];
+  ] as const;
 }
 
 /**
