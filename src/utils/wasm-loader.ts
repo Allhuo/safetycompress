@@ -17,6 +17,8 @@ let ghostscriptModule: GhostscriptModule | null = null;
 let isLoaded = false;
 let isLoading = false;
 let loadPromise: Promise<GhostscriptModule> | null = null;
+let wasmWorker: Worker | null = null;
+let preloadedWasmData: ArrayBuffer | null = null;
 
 /**
  * 检查WebAssembly支持
@@ -27,78 +29,294 @@ export function isWebAssemblySupported(): boolean {
 }
 
 /**
- * 动态加载Ghostscript JS脚本
+ * 检查WebWorker支持
+ */
+export function isWebWorkerSupported(): boolean {
+  return typeof Worker !== 'undefined';
+}
+
+/**
+ * 使用WebWorker预加载WASM文件
+ */
+async function preloadWasmWithWorker(
+  wasmPath: string,
+  onProgress?: (progress: WSAMLoadProgress) => void
+): Promise<ArrayBuffer> {
+  
+  if (preloadedWasmData) {
+    return preloadedWasmData;
+  }
+
+  return new Promise((resolve, reject) => {
+    if (!isWebWorkerSupported()) {
+      reject(new Error('WebWorker不受支持，回退到主线程加载'));
+      return;
+    }
+
+    try {
+      wasmWorker = new Worker('/wasm-loader.worker.js');
+      
+      wasmWorker.onmessage = (e) => {
+        const { type, percent, message, data, error, size } = e.data;
+        
+        switch (type) {
+          case 'progress':
+            if (onProgress) {
+              onProgress({
+                loaded: percent,
+                total: 100,
+                percentage: percent,
+                message,
+                status: e.data.status
+              });
+            }
+            break;
+            
+          case 'complete':
+            preloadedWasmData = data;
+            if (onProgress) {
+              onProgress({
+                loaded: 100,
+                total: 100,
+                percentage: 100,
+                message: `WASM预加载完成 (${(size / 1024 / 1024).toFixed(1)}MB)`
+              });
+            }
+            resolve(data);
+            break;
+            
+          case 'error':
+            reject(new Error(error));
+            break;
+        }
+      };
+      
+      wasmWorker.onerror = (error) => {
+        reject(new Error(`WebWorker错误: ${error.message}`));
+      };
+      
+      // 开始预加载
+      wasmWorker.postMessage({ action: 'preload', url: wasmPath });
+      
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+/**
+ * 回退：主线程加载WASM（带进度监听）
+ */
+async function loadWasmWithProgress(
+  wasmPath: string,
+  onProgress?: (progress: WSAMLoadProgress) => void
+): Promise<ArrayBuffer> {
+  
+  if (onProgress) {
+    onProgress({
+      loaded: 0,
+      total: 100,
+      percentage: 0,
+      message: '开始下载WASM文件...'
+    });
+  }
+
+  const response = await fetch(wasmPath);
+  
+  if (!response.ok) {
+    throw new Error(`下载WASM失败: ${response.status}`);
+  }
+  
+  const contentLength = +response.headers.get('Content-Length')!;
+  
+  if (!contentLength) {
+    // 简单下载，无进度
+    if (onProgress) {
+      onProgress({
+        loaded: 50,
+        total: 100,
+        percentage: 50,
+        message: '正在下载WASM文件...'
+      });
+    }
+    
+    const arrayBuffer = await response.arrayBuffer();
+    
+    if (onProgress) {
+      onProgress({
+        loaded: 100,
+        total: 100,
+        percentage: 100,
+        message: 'WASM下载完成'
+      });
+    }
+    
+    return arrayBuffer;
+  }
+  
+  // 带进度的下载
+  const reader = response.body!.getReader();
+  const chunks = [];
+  let receivedLength = 0;
+  
+  while (true) {
+    const { done, value } = await reader.read();
+    
+    if (done) break;
+    
+    chunks.push(value);
+    receivedLength += value.length;
+    
+    const percent = Math.round((receivedLength / contentLength) * 100);
+    const mbReceived = (receivedLength / 1024 / 1024).toFixed(1);
+    const mbTotal = (contentLength / 1024 / 1024).toFixed(1);
+    
+    if (onProgress) {
+      onProgress({
+        loaded: receivedLength,
+        total: contentLength,
+        percentage: percent,
+        message: `正在下载WASM文件... ${mbReceived}MB / ${mbTotal}MB`
+      });
+    }
+  }
+  
+  // 合并chunks
+  const uint8Array = new Uint8Array(receivedLength);
+  let position = 0;
+  for (const chunk of chunks) {
+    uint8Array.set(chunk, position);
+    position += chunk.length;
+  }
+  
+  return uint8Array.buffer;
+}
+
+/**
+ * 加载Ghostscript JS脚本
  */
 async function loadGhostscriptScript(jsPath: string): Promise<any> {
   return new Promise((resolve, reject) => {
     // 检查是否已经加载
-    if (window.Module && typeof window.Module === 'function') {
-      resolve(window.Module);
+    if ((window as any).Module) {
+      resolve((window as any).Module);
       return;
     }
 
     const script = document.createElement('script');
     script.src = jsPath;
     script.onload = () => {
-      // Ghostscript WASM 模块加载后，window.Module 应该可用
-      if (window.Module && typeof window.Module === 'function') {
-        resolve(window.Module);
+      if ((window as any).Module) {
+        resolve((window as any).Module);
       } else {
-        reject(new Error('Ghostscript module not found after script load'));
+        reject(new Error('Ghostscript脚本加载失败'));
       }
     };
-    script.onerror = () => reject(new Error(`Failed to load ${jsPath}`));
+    script.onerror = () => reject(new Error('无法加载Ghostscript脚本'));
     
     document.head.appendChild(script);
   });
 }
 
 /**
- * 初始化Ghostscript模块
+ * 初始化Ghostscript模块（使用预加载的WASM数据）
  */
 async function initializeGhostscript(
   config: GhostscriptConfig,
   onProgress?: (progress: WSAMLoadProgress) => void
 ): Promise<GhostscriptModule> {
   
-  // 加载JS脚本
+  // 阶段1：加载JS脚本
   if (onProgress) {
-    onProgress({ loaded: 0, total: 100, percentage: 10 });
+    onProgress({ 
+      loaded: 0, 
+      total: 100, 
+      percentage: 0,
+      message: '正在加载Ghostscript脚本...' 
+    });
   }
   
   const ModuleFactory = await loadGhostscriptScript(config.jsPath);
   
+  // 阶段2：获取WASM数据（优先使用预加载的）
+  let wasmData: ArrayBuffer;
+  
+  if (preloadedWasmData) {
+    if (onProgress) {
+      onProgress({
+        loaded: 50,
+        total: 100,
+        percentage: 50,
+        message: '使用预加载的WASM数据...'
+      });
+    }
+    wasmData = preloadedWasmData;
+  } else {
+    // 回退到主线程下载
+    if (onProgress) {
+      onProgress({
+        loaded: 20,
+        total: 100,
+        percentage: 20,
+        message: '开始下载WASM文件...'
+      });
+    }
+    
+    wasmData = await loadWasmWithProgress(config.wasmPath, (progress) => {
+      if (onProgress) {
+        // 将WASM下载进度映射到总进度的20%-80%
+        onProgress({
+          loaded: 20 + (progress.percentage * 0.6),
+          total: 100,
+          percentage: 20 + (progress.percentage * 0.6),
+          message: progress.message
+        });
+      }
+    });
+  }
+  
+  // 阶段3：初始化模块
   if (onProgress) {
-    onProgress({ loaded: 30, total: 100, percentage: 30 });
+    onProgress({
+      loaded: 90,
+      total: 100,
+      percentage: 90,
+      message: '正在初始化WASM模块...'
+    });
   }
 
-  // 创建模块实例
   const moduleConfig = {
+    wasmBinary: wasmData, // 直接使用预加载的数据
     locateFile: (path: string) => {
       if (path.endsWith('.wasm')) {
         return config.wasmPath;
       }
       return path;
     },
-    
-    // 进度回调
-    ...(onProgress && {
-      onRuntimeInitialized: () => {
-        onProgress({ loaded: 100, total: 100, percentage: 100 });
-      }
-    })
   };
 
   // 初始化模块
   const module = await ModuleFactory(moduleConfig);
   
   // 等待模块准备就绪
-  await module.ready;
+  if (module.ready) {
+    await module.ready;
+  }
 
-  // 创建我们的包装器对象
+  if (onProgress) {
+    onProgress({
+      loaded: 100,
+      total: 100,
+      percentage: 100,
+      message: 'Ghostscript引擎初始化完成'
+    });
+  }
+
+  // 创建包装器对象
   const wrapper: GhostscriptModule = {
     FS: module.FS,
     Module: module,
+    callMain: module.callMain?.bind(module) || (() => { throw new Error('callMain not available'); }),
     arguments: [],
     preRun: [],
     postRun: [],
@@ -109,6 +327,24 @@ async function initializeGhostscript(
   };
 
   return wrapper;
+}
+
+/**
+ * 预加载Ghostscript WASM（后台WebWorker）
+ */
+export async function preloadGhostscript(
+  config: Partial<GhostscriptConfig> = {},
+  onProgress?: (progress: WSAMLoadProgress) => void
+): Promise<void> {
+  
+  const finalConfig = { ...DEFAULT_CONFIG, ...config };
+  
+  try {
+    await preloadWasmWithWorker(finalConfig.wasmPath, onProgress);
+  } catch (error) {
+    console.warn('WebWorker预加载失败，将在需要时回退到主线程:', error);
+    // 不抛出错误，而是在实际使用时回退
+  }
 }
 
 /**
@@ -155,37 +391,27 @@ export async function loadGhostscript(
 }
 
 /**
- * 预加载Ghostscript（后台加载）
- */
-export function preloadGhostscript(
-  config: Partial<GhostscriptConfig> = {},
-  onProgress?: (progress: WSAMLoadProgress) => void
-): Promise<GhostscriptModule> {
-  return loadGhostscript(config, onProgress).catch((error) => {
-    console.warn('Ghostscript preload failed:', error);
-    throw error;
-  });
-}
-
-/**
  * 获取当前加载状态
  */
 export function getLoadState() {
   return {
     isLoaded,
     isLoading,
-    module: ghostscriptModule
+    module: ghostscriptModule,
+    hasPreloadedData: !!preloadedWasmData,
+    preloadedSize: preloadedWasmData ? preloadedWasmData.byteLength : 0
   };
 }
 
 /**
- * 重置加载状态（用于测试或重新加载）
+ * 清理资源
  */
-export function resetLoadState() {
-  ghostscriptModule = null;
-  isLoaded = false;
-  isLoading = false;
-  loadPromise = null;
+export function cleanup() {
+  if (wasmWorker) {
+    wasmWorker.terminate();
+    wasmWorker = null;
+  }
+  preloadedWasmData = null;
 }
 
 // 类型声明

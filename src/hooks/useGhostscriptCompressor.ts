@@ -9,6 +9,11 @@ import {
   validatePDFFile,
   getModuleLoadState
 } from '../wasm/ghostscript-compressor';
+import { 
+  preloadGhostscript, 
+  getLoadState,
+  cleanup 
+} from '../utils/wasm-loader';
 
 /**
  * Ghostscript压缩器的Hook
@@ -28,7 +33,7 @@ export function useGhostscriptCompressor() {
   const [isCompressing, setIsCompressing] = useState(false);
 
   /**
-   * 开始预加载Ghostscript
+   * 开始预加载Ghostscript（使用WebWorker）
    */
   const startPreload = useCallback(async () => {
     // 检查WebAssembly支持
@@ -41,77 +46,42 @@ export function useGhostscriptCompressor() {
     }
 
     // 检查是否已经加载或正在加载
-    const { isLoaded } = getModuleLoadState();
-    if (isLoaded || preloaderState.isLoading) {
+    const { isLoaded, isLoading, hasPreloadedData } = getLoadState();
+    if (isLoaded || isLoading || hasPreloadedData || preloaderState.isLoading) {
+      if (hasPreloadedData) {
+        setPreloaderState(prev => ({
+          ...prev,
+          isLoaded: true,
+          isLoading: false,
+          progress: 100
+        }));
+      }
       return;
     }
 
     setPreloaderState(prev => ({
       ...prev,
       isLoading: true,
-      error: null
+      error: null,
+      progress: 0
     }));
 
     try {
-      // 直接加载gs.js脚本进行预加载
-      const script = document.createElement('script');
-      script.src = '/gs.js';
-      
-      script.onload = async () => {
-        try {
-          setPreloaderState(prev => ({
-            ...prev,
-            progress: 50
-          }));
-
-          // 初始化模块
-          if ((window as any).Module) {
-            await (window as any).Module();
-            
-            setPreloaderState(prev => ({
-              ...prev,
-              isLoaded: true,
-              isLoading: false,
-              progress: 100
-            }));
-          } else {
-            throw new Error('Module不可用');
-          }
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : '初始化失败';
-          setPreloaderState(prev => ({
-            ...prev,
-            isLoading: false,
-            error: errorMessage,
-            retryCount: prev.retryCount + 1
-          }));
-        }
-      };
-      
-      script.onerror = () => {
+      // 使用WebWorker预加载
+      await preloadGhostscript({}, (progress) => {
         setPreloaderState(prev => ({
           ...prev,
-          isLoading: false,
-          error: '无法加载Ghostscript脚本',
-          retryCount: prev.retryCount + 1
+          progress: progress.percentage,
+          message: progress.message
         }));
-      };
+      });
 
-      // 检查脚本是否已经加载
-      const existingScript = document.querySelector('script[src="/gs.js"]');
-      if (!existingScript) {
-        document.head.appendChild(script);
-      } else {
-        // 脚本已存在，直接检查Module是否可用
-        if ((window as any).Module) {
-          setPreloaderState(prev => ({
-            ...prev,
-            isLoaded: true,
-            isLoading: false,
-            progress: 100
-          }));
-        }
-      }
+      setPreloaderState(prev => ({
+        ...prev,
+        isLoaded: true,
+        isLoading: false,
+        progress: 100
+      }));
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '预加载失败';
@@ -185,12 +155,13 @@ export function useGhostscriptCompressor() {
    * 获取压缩状态信息
    */
   const getStatus = useCallback(() => {
-    const loadState = getModuleLoadState();
+    const loadState = getLoadState();
+    const moduleState = getModuleLoadState();
     
     return {
       // 引擎状态
-      engineReady: loadState.isLoaded || preloaderState.isLoaded,
-      engineLoading: preloaderState.isLoading,
+      engineReady: moduleState.isLoaded || loadState.isLoaded || loadState.hasPreloadedData,
+      engineLoading: preloaderState.isLoading || loadState.isLoading,
       engineError: preloaderState.error,
       
       // 压缩状态
@@ -202,7 +173,11 @@ export function useGhostscriptCompressor() {
       retryCount: preloaderState.retryCount,
       
       // 预加载进度
-      preloadProgress: preloaderState.progress
+      preloadProgress: preloaderState.progress,
+      
+      // 新增：预加载数据信息
+      hasPreloadedData: loadState.hasPreloadedData,
+      preloadedSize: loadState.preloadedSize
     };
   }, [preloaderState, isCompressing, compressionProgress]);
 
@@ -225,20 +200,31 @@ export function useGhostscriptCompressor() {
    * 页面加载时自动开始预加载
    */
   useEffect(() => {
-    // 延迟1秒开始预加载，让页面先渲染完成
+    // 延迟500ms开始预加载，让页面先渲染完成
     const timer = setTimeout(() => {
       startPreload();
-    }, 1000);
+    }, 500);
 
     return () => clearTimeout(timer);
   }, [startPreload]);
+
+  /**
+   * 组件卸载时清理资源
+   */
+  useEffect(() => {
+    return () => {
+      cleanup();
+    };
+  }, []);
 
   /**
    * 监听模块加载状态变化
    */
   useEffect(() => {
     const { isLoaded } = getModuleLoadState();
-    if (isLoaded && !preloaderState.isLoaded) {
+    const { hasPreloadedData } = getLoadState();
+    
+    if ((isLoaded || hasPreloadedData) && !preloaderState.isLoaded) {
       setPreloaderState(prev => ({
         ...prev,
         isLoaded: true,
@@ -261,33 +247,50 @@ export function useGhostscriptCompressor() {
     retryPreload,
     
     // 实时状态（用于UI展示）
-    isEngineReady: preloaderState.isLoaded || getModuleLoadState().isLoaded,
-    isEngineLoading: preloaderState.isLoading,
+    isEngineReady: getStatus().engineReady,
+    isEngineLoading: getStatus().engineLoading,
     engineError: preloaderState.error,
     preloadProgress: preloaderState.progress,
     isCompressing,
-    compressionProgress
+    compressionProgress,
+    
+    // 新增：详细状态信息
+    hasPreloadedData: getStatus().hasPreloadedData,
+    preloadedSize: getStatus().preloadedSize
   };
 }
 
 /**
- * 简化版Hook，只用于检查引擎状态
+ * 简化的状态Hook（仅状态查询）
  */
 export function useGhostscriptStatus() {
-  const [status, setStatus] = useState(() => getModuleLoadState());
+  const [status, setStatus] = useState(() => {
+    const loadState = getLoadState();
+    const moduleState = getModuleLoadState();
+    
+    return {
+      isReady: moduleState.isLoaded || loadState.hasPreloadedData,
+      isLoading: loadState.isLoading,
+      hasPreloadedData: loadState.hasPreloadedData,
+      preloadedSize: loadState.preloadedSize
+    };
+  });
 
   useEffect(() => {
     const interval = setInterval(() => {
-      const currentState = getModuleLoadState();
-      setStatus(currentState);
+      const loadState = getLoadState();
+      const moduleState = getModuleLoadState();
+      
+      setStatus({
+        isReady: moduleState.isLoaded || loadState.hasPreloadedData,
+        isLoading: loadState.isLoading,
+        hasPreloadedData: loadState.hasPreloadedData,
+        preloadedSize: loadState.preloadedSize
+      });
     }, 1000);
 
     return () => clearInterval(interval);
   }, []);
 
-  return {
-    isReady: status.isLoaded,
-    isLoading: false, // 简化版不跟踪加载状态
-    module: status.module
-  };
+  return status;
 } 

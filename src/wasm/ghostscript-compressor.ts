@@ -2,6 +2,7 @@ import type {
   CompressionResult, 
   CompressionProgress
 } from './types';
+import { loadGhostscript } from '../utils/wasm-loader';
 
 // 使用正确的Ghostscript WASM包
 let ghostscriptModule: any = null;
@@ -27,34 +28,7 @@ const QUALITY_MAPPING = {
 } as const;
 
 /**
- * 动态加载Ghostscript脚本
- */
-async function loadGhostscriptScript(): Promise<any> {
-  return new Promise((resolve, reject) => {
-    // 检查是否已经有全局的Module函数
-    if ((window as any).Module) {
-      resolve((window as any).Module);
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.src = '/gs.js';  // 从public目录加载
-    script.onload = () => {
-      // gs.js会在全局设置Module
-      if ((window as any).Module) {
-        resolve((window as any).Module);
-      } else {
-        reject(new Error('Ghostscript模块加载失败'));
-      }
-    };
-    script.onerror = () => reject(new Error('无法加载Ghostscript脚本'));
-    
-    document.head.appendChild(script);
-  });
-}
-
-/**
- * 加载Ghostscript WASM模块
+ * 加载Ghostscript WASM模块（使用新的加载器）
  */
 async function loadGhostscriptModule(onProgress?: (progress: any) => void): Promise<any> {
   if (isModuleLoaded && ghostscriptModule) {
@@ -63,18 +37,20 @@ async function loadGhostscriptModule(onProgress?: (progress: any) => void): Prom
 
   try {
     if (onProgress) {
-      onProgress({ percentage: 10, message: '正在加载Ghostscript脚本...' });
+      onProgress({ percentage: 10, message: '正在加载Ghostscript引擎...' });
     }
 
-    // 直接加载gs.js脚本
-    const ModuleFactory = await loadGhostscriptScript();
-    
-    if (onProgress) {
-      onProgress({ percentage: 50, message: '正在初始化Ghostscript引擎...' });
-    }
+    // 使用新的加载器
+    const module = await loadGhostscript({}, (progress) => {
+      if (onProgress) {
+        onProgress({ 
+          percentage: progress.percentage, 
+          message: progress.message || `正在加载压缩引擎... ${Math.round(progress.percentage)}%`
+        });
+      }
+    });
 
-    // 调用Module工厂函数
-    ghostscriptModule = await ModuleFactory();
+    ghostscriptModule = module.Module;
     isModuleLoaded = true;
 
     if (onProgress) {
@@ -253,30 +229,27 @@ export async function compressPDFWithGhostscript(
 }
 
 /**
- * 验证文件是否为有效的PDF
+ * 验证PDF文件格式
  */
 export function validatePDFFile(fileBuffer: ArrayBuffer): boolean {
-  const bytes = new Uint8Array(fileBuffer);
-  
-  // 检查PDF文件头
-  const pdfHeader = '%PDF-';
-  const headerBytes = bytes.slice(0, 5);
-  const headerString = Array.from(headerBytes).map(b => String.fromCharCode(b)).join('');
-  
-  return headerString === pdfHeader;
+  try {
+    const uint8Array = new Uint8Array(fileBuffer);
+    const header = new TextDecoder().decode(uint8Array.slice(0, 8));
+    return header.startsWith('%PDF-');
+  } catch {
+    return false;
+  }
 }
 
 /**
- * 获取支持的压缩质量选项
+ * 获取可用的压缩质量等级
  */
 export function getCompressionQualities() {
-  return Object.entries(QUALITY_MAPPING).map(([key, value]) => ({
-    id: key as keyof typeof QUALITY_MAPPING,
-    name: key === 'high-efficiency' ? '高效压缩' : 
-          key === 'balanced' ? '平衡模式' : '高质量',
-    description: value.description,
-    dpi: value.dpi
-  }));
+  return [
+    { id: 'high-efficiency', ...QUALITY_MAPPING['high-efficiency'] },
+    { id: 'balanced', ...QUALITY_MAPPING['balanced'] },
+    { id: 'high-quality', ...QUALITY_MAPPING['high-quality'] }
+  ];
 }
 
 /**

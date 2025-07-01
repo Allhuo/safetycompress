@@ -3,6 +3,7 @@
 export interface GhostscriptModule {
   FS: any;
   Module: any;
+  callMain?: (args: string[]) => number;
   arguments: string[];
   preRun: (() => void)[];
   postRun: (() => void)[];
@@ -52,4 +53,6 @@ export interface WSAMLoadProgress {
   loaded: number;
   total: number;
   percentage: number;
+  message?: string;
+  status?: string;
 } 
