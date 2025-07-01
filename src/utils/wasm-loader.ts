@@ -19,6 +19,7 @@ let isLoading = false;
 let loadPromise: Promise<GhostscriptModule> | null = null;
 let wasmWorker: Worker | null = null;
 let preloadedWasmData: ArrayBuffer | null = null;
+let workerPromise: Promise<ArrayBuffer> | null = null;
 
 /**
  * 检查WebAssembly支持
@@ -44,64 +45,96 @@ async function preloadWasmWithWorker(
 ): Promise<ArrayBuffer> {
   
   if (preloadedWasmData) {
+    if (onProgress) {
+      onProgress({
+        loaded: 100,
+        total: 100,
+        percentage: 100,
+        message: 'WASM数据已预加载完成'
+      });
+    }
     return preloadedWasmData;
   }
 
-  return new Promise((resolve, reject) => {
+  if (workerPromise) {
+    return workerPromise;
+  }
+
+  workerPromise = new Promise((resolve, reject) => {
     if (!isWebWorkerSupported()) {
       reject(new Error('WebWorker不受支持，回退到主线程加载'));
       return;
     }
 
     try {
-      wasmWorker = new Worker('/wasm-loader.worker.js');
-      
-      wasmWorker.onmessage = (e) => {
-        const { type, percent, message, data, error, size } = e.data;
+      if (!wasmWorker) {
+        wasmWorker = new Worker('/wasm-loader.worker.js');
         
-        switch (type) {
-          case 'progress':
-            if (onProgress) {
-              onProgress({
-                loaded: percent,
-                total: 100,
-                percentage: percent,
-                message,
-                status: e.data.status
-              });
-            }
-            break;
-            
-          case 'complete':
-            preloadedWasmData = data;
-            if (onProgress) {
-              onProgress({
-                loaded: 100,
-                total: 100,
-                percentage: 100,
-                message: `WASM预加载完成 (${(size / 1024 / 1024).toFixed(1)}MB)`
-              });
-            }
-            resolve(data);
-            break;
-            
-          case 'error':
-            reject(new Error(error));
-            break;
+        wasmWorker.onmessage = (e) => {
+          const { type, percent, message, data, error, size } = e.data;
+          
+          switch (type) {
+            case 'progress':
+              if (onProgress) {
+                onProgress({
+                  loaded: percent,
+                  total: 100,
+                  percentage: percent,
+                  message,
+                  status: e.data.status
+                });
+              }
+              break;
+              
+            case 'complete':
+              preloadedWasmData = data;
+              workerPromise = null;
+              if (onProgress) {
+                onProgress({
+                  loaded: 100,
+                  total: 100,
+                  percentage: 100,
+                  message: `WASM预加载完成 (${(size / 1024 / 1024).toFixed(1)}MB)`
+                });
+              }
+              resolve(data);
+              break;
+              
+            case 'error':
+              workerPromise = null;
+              reject(new Error(error));
+              break;
+          }
+        };
+        
+        wasmWorker.onerror = (error) => {
+          workerPromise = null;
+          reject(new Error(`WebWorker错误: ${error.message}`));
+        };
+      }
+      
+      wasmWorker.postMessage({ action: 'getStatus' });
+      
+      const statusHandler = (e: MessageEvent) => {
+        if (e.data.type === 'status') {
+          if (e.data.hasData) {
+            wasmWorker!.postMessage({ action: 'getData' });
+          } else if (!e.data.isLoading) {
+            wasmWorker!.postMessage({ action: 'preload', url: wasmPath });
+          }
+          wasmWorker!.removeEventListener('message', statusHandler);
         }
       };
       
-      wasmWorker.onerror = (error) => {
-        reject(new Error(`WebWorker错误: ${error.message}`));
-      };
-      
-      // 开始预加载
-      wasmWorker.postMessage({ action: 'preload', url: wasmPath });
+      wasmWorker.addEventListener('message', statusHandler);
       
     } catch (error) {
+      workerPromise = null;
       reject(error);
     }
   });
+
+  return workerPromise;
 }
 
 /**
@@ -408,10 +441,18 @@ export function getLoadState() {
  */
 export function cleanup() {
   if (wasmWorker) {
+    // 清除WebWorker中的缓存数据
+    wasmWorker.postMessage({ action: 'clear' });
     wasmWorker.terminate();
     wasmWorker = null;
   }
+  
+  // 重置所有全局状态
   preloadedWasmData = null;
+  workerPromise = null;
+  
+  // 注意：这里不重置 ghostscriptModule、isLoaded、isLoading、loadPromise
+  // 因为这些用于 Ghostscript 模块本身的状态，而不是预加载状态
 }
 
 // 类型声明

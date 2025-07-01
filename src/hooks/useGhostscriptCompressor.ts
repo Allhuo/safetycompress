@@ -47,15 +47,21 @@ export function useGhostscriptCompressor() {
 
     // 检查是否已经加载或正在加载
     const { isLoaded, isLoading, hasPreloadedData } = getLoadState();
-    if (isLoaded || isLoading || hasPreloadedData || preloaderState.isLoading) {
-      if (hasPreloadedData) {
-        setPreloaderState(prev => ({
-          ...prev,
-          isLoaded: true,
-          isLoading: false,
-          progress: 100
-        }));
-      }
+    
+    // 如果已经有预加载数据或模块已加载，更新状态并返回
+    if (isLoaded || hasPreloadedData) {
+      setPreloaderState(prev => ({
+        ...prev,
+        isLoaded: true,
+        isLoading: false,
+        progress: 100,
+        error: null
+      }));
+      return;
+    }
+    
+    // 如果正在加载或本地状态显示正在加载，不重复启动
+    if (isLoading || preloaderState.isLoading) {
       return;
     }
 
@@ -93,7 +99,7 @@ export function useGhostscriptCompressor() {
         retryCount: prev.retryCount + 1
       }));
     }
-  }, [preloaderState.isLoading]);
+  }, []);
 
   /**
    * 重试预加载
@@ -200,13 +206,34 @@ export function useGhostscriptCompressor() {
    * 页面加载时自动开始预加载
    */
   useEffect(() => {
+    // 检查是否已经有数据，避免重复加载
+    const { isLoaded, isLoading, hasPreloadedData } = getLoadState();
+    
+    if (isLoaded || isLoading || hasPreloadedData) {
+      // 如果已经有数据，更新本地状态
+      if (isLoaded || hasPreloadedData) {
+        setPreloaderState(prev => ({
+          ...prev,
+          isLoaded: true,
+          isLoading: false,
+          progress: 100,
+          error: null
+        }));
+      }
+      return;
+    }
+    
     // 延迟500ms开始预加载，让页面先渲染完成
     const timer = setTimeout(() => {
-      startPreload();
+      // 再次检查状态，确保没有重复加载
+      const currentState = getLoadState();
+      if (!currentState.isLoaded && !currentState.isLoading && !currentState.hasPreloadedData) {
+        startPreload();
+      }
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [startPreload]);
+  }, []); // 空依赖数组，只在组件挂载时执行一次
 
   /**
    * 组件卸载时清理资源
@@ -218,21 +245,27 @@ export function useGhostscriptCompressor() {
   }, []);
 
   /**
-   * 监听模块加载状态变化
+   * 监听全局模块加载状态变化（用于同步状态）
    */
   useEffect(() => {
-    const { isLoaded } = getModuleLoadState();
-    const { hasPreloadedData } = getLoadState();
-    
-    if ((isLoaded || hasPreloadedData) && !preloaderState.isLoaded) {
-      setPreloaderState(prev => ({
-        ...prev,
-        isLoaded: true,
-        isLoading: false,
-        progress: 100
-      }));
-    }
-  }, [preloaderState.isLoaded]);
+    // 定期检查全局状态，但不触发加载
+    const interval = setInterval(() => {
+      const { isLoaded } = getModuleLoadState();
+      const { hasPreloadedData } = getLoadState();
+      
+      if ((isLoaded || hasPreloadedData) && !preloaderState.isLoaded) {
+        setPreloaderState(prev => ({
+          ...prev,
+          isLoaded: true,
+          isLoading: false,
+          progress: 100,
+          error: null
+        }));
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []); // 空依赖数组，避免重复创建定时器
 
   return {
     // 主要功能
